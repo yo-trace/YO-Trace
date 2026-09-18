@@ -1,36 +1,36 @@
+English | [简体中文](README_CN.md)
+
 # YO-Trace
 
-[English](README_EN.md) | 简体中文
+> A screen-memory search tool — periodically captures your Windows screen windows and text, runs local OCR, stores results in SQLite, and provides a command-line tool to search by content.
 
-> 屏幕记忆搜索工具 —— 周期性采集 Windows 屏幕窗口与文字，本地 OCR 识别后存入 SQLite，并提供按内容搜索的命令行工具。
+YO-Trace keeps "watching" your screen in the background: every few seconds it captures the visible windows, runs OCR (Optical Character Recognition) over the full screen, and writes the recognized text blocks (with coordinates and confidence) together with window snapshots into a local database. Later you can search for any text that has ever appeared on screen using keywords (e.g. "WeChat", "meeting notes") — essentially a **searchable screen memory**.
 
-YO-Trace 在后台持续「观察」你的屏幕：每隔几秒采集一次可见窗口，对全屏做 OCR（光学字符识别），把识别出的文字块（含坐标与置信度）和窗口快照写入本地数据库。之后你可以用关键字（如「微信」「会议纪要」）检索任何曾经出现在屏幕上的文字，相当于一个**可搜索的屏幕记忆**。
+## Features
 
-## 特性
+- **Window-level capture**: enumerates visible windows (title, owning process, position) and stores them per snapshot.
+- **Full-screen OCR**:
+  - The primary engine is **Windows native OCR** (`Windows.Media.Ocr`, WinRT). On MinGW it is invoked through a **hand-written WinRT ABI**, with no C++/WinRT compiler required and **no third-party OCR runtime to install**.
+  - When the native engine is unavailable (non-Win10/11, missing OCR language pack, etc.), it **automatically falls back to Tesseract** (the `tesseract.exe` subprocess).
+- **Local-first / privacy-friendly**: all data lives only in a local SQLite file; nothing is uploaded to any server.
+- **Idle-window batch processing**: screenshots from high-frequency changes are queued first and recognized in the background during "idle windows" (first 5 minutes of every hour, or 60 seconds without change) to avoid pegging the CPU with repeated OCR.
+- **System-tray resident**: the main program has no main window; it lives in the system tray. F12 triggers an immediate capture, right-click the tray icon to exit.
+- **Command-line search**: `yotrace_query.exe <keyword>` fuzzy-searches historical text blocks by content.
 
-- **窗口级采集**：枚举当前可见窗口（标题、所属程序、位置），按快照入库。
-- **全屏 OCR**：
-  - 主引擎为 **Windows 原生 OCR**（`Windows.Media.Ocr`，WinRT）。在 MinGW 下通过**手写 WinRT ABI** 直接调用，无需 C++/WinRT 编译器支持，也**无需安装任何第三方 OCR 运行时**。
-  - 当原生引擎不可用（非 Win10/11、缺少 OCR 语言包等）时，**自动回退到 Tesseract**（子进程 `tesseract.exe`）。
-- **本地优先 / 隐私友好**：所有数据仅存于本机 SQLite 文件，不上传任何服务器。
-- **空闲批量补处理**：高频变化时的截图先入队，在「空闲窗口」（每小时前 5 分钟或连续 60 秒无变化）于后台批量识别，避免反复 OCR 打满 CPU。
-- **托盘常驻**：主程序无主窗口，常驻系统托盘，F12 立即触发一次采集，右键退出。
-- **命令行检索**：`yotrace_query.exe <关键字>` 按内容模糊搜索历史文本块。
+## Requirements
 
-## 系统要求
+- Windows 10 / 11 (native OCR needs the system's built-in OCR language pack; Chinese/English are available by default).
+- MinGW-w64 toolchain (g++ 10+, to build from source).
+- (Optional) Tesseract runtime, used only as a fallback when native OCR is unavailable.
 
-- Windows 10 / 11（原生 OCR 需要系统自带 OCR 语言包；中文/英文默认可用）。
-- MinGW-w64 工具链（g++ 10+，用于从源码构建）。
-- （可选）Tesseract 运行时，仅当原生 OCR 不可用时作为回退。
+## Build
 
-## 构建
+The repository ships SQLite's import library and headers (`src/phase2/third_party/sqlite/`), so no extra download is needed to compile.
 
-仓库已内置 SQLite 的导入库与头文件（`src/phase2/third_party/sqlite/`），无需额外下载即可编译。
-
-使用 MinGW-w64 的 `g++`：
+Using MinGW-w64 `g++`:
 
 ```bash
-# 阶段三主程序
+# Phase 3 main program
 g++.exe -std=c++17 -O2 -static ^
   -I src/phase2 -I src/phase2/third_party/sqlite -I src/phase3 ^
   src/phase2/sqlite_storage.cpp ^
@@ -41,7 +41,7 @@ g++.exe -std=c++17 -O2 -static ^
   -L src/phase2/third_party/sqlite -lsqlite3 -lgdi32 -lruntimeobject -lole32 ^
   -o build/yotrace_phase3.exe
 
-# 查询工具
+# Query tool
 g++.exe -std=c++17 -O2 -static ^
   -I src/phase2 -I src/phase2/third_party/sqlite -I src/phase3 ^
   src/phase2/sqlite_storage.cpp ^
@@ -50,54 +50,52 @@ g++.exe -std=c++17 -O2 -static ^
   -o build/yotrace_query.exe
 ```
 
-> 链接说明：`-lruntimeobject`（`Ro*` WinRT 运行时函数）、`-lole32`（`CoTaskMem*`）、`-lgdi32`（屏幕截取）、`-lshell32`（`CommandLineToArgvW`）。
-> 项目自带的是 SQLite **导入库**（`libsqlite3.a` 指向 `sqlite3.dll`），因此运行时需与 `sqlite3.dll` 放在同一目录（见下方「发布」）。
+> Linking notes: `-lruntimeobject` (the `Ro*` WinRT runtime functions), `-lole32` (`CoTaskMem*`), `-lgdi32` (screen capture), `-lshell32` (`CommandLineToArgvW`).
+> The project's SQLite is an **import library** (`libsqlite3.a` pointing at `sqlite3.dll`), so at runtime `sqlite3.dll` must sit in the same directory (see Releases below).
 
-## 使用
+## Usage
 
-1. 双击 `yotrace_phase3.exe` 启动（无主窗口，托盘出现图标）。
-2. 程序每 5 秒自动采集；按 **F12** 立即触发一次；右键托盘图标退出。
-3. 数据写入同目录的 `yotrace_phase3.db`，运行日志写入 `yotrace_phase3.log`。
-4. 打开命令行进入该程序所在目录，进行检索：
+1. Double-click `yotrace_phase3.exe` to start (no main window; a tray icon appears).
+2. The program captures automatically every 5 seconds; press **F12** for an immediate capture; right-click the tray icon to exit.
+3. Data is written to `yotrace_phase3.db` in the same directory; the run log goes to `yotrace_phase3.log`.
+4. Open a command line in that directory and search:
 
    ```bash
-   yotrace_query.exe             # 列出全部已识别文本块
-   yotrace_query.exe 微信        # 按关键字搜索
+   yotrace_query.exe             # list all recognized text blocks
+   yotrace_query.exe WeChat      # search by keyword
    ```
 
-   > 查询工具从**自身所在目录**读取 `yotrace_phase3.db`，并依赖同目录的 `sqlite3.dll`。
+   > The query tool reads `yotrace_phase3.db` from **its own directory** and depends on `sqlite3.dll` in the same directory.
 
-## 发布 / 预编译包
+## Releases / Prebuilt binaries
 
-本仓库只包含**源代码与文档**。编译产物（`*.exe`/`*.dll`）、Tesseract 回退运行时（`dist/tesseract/`）以及 `sqlite3.dll` 通过 **GitHub Releases** 分发，不纳入版本库（见 `.gitignore`）。
+This repository contains **source code and docs only**. Build artifacts (`*.exe`/`*.dll`), the Tesseract fallback runtime (`dist/tesseract/`), and `sqlite3.dll` are distributed via **GitHub Releases** and are not tracked in the repository (see `.gitignore`).
 
-## 项目结构
+## Project structure
 
 ```
 YO-Trace/
 ├── src/
-│   ├── phase1/                # 窗口枚举与快照采集（基础能力）
-│   ├── phase2/                # SQLite 存储层 + 窗口查询
-│   │   └── third_party/sqlite/  # SQLite 导入库 + 头文件（随仓库提供）
-│   └── phase3/                # 屏幕截取 + OCR(原生/Tesseract) + 空闲批量处理 + 查询 CLI
+│   ├── phase1/                # window enumeration & snapshot capture (basics)
+│   ├── phase2/                # SQLite storage layer + window queries
+│   │   └── third_party/sqlite/  # SQLite import lib + headers (shipped with repo)
+│   └── phase3/                # screen capture + OCR (native/Tesseract) + idle batch + query CLI
 ├── docs/
-│   └── 需求场景.md            # 需求与场景说明
-├── YO-Trace 任务清单.md        # 开发任务清单
+│   └── 需求场景.md            # requirements & scenarios (Chinese)
+├── YO-Trace 任务清单.md        # development task list (Chinese)
 ├── README.md
+├── README_CN.md
 ├── LICENSE
 └── .gitignore
 ```
 
-## 工作原理（简述）
+## How it works (brief)
 
-1. **采集**：`ScreenCapture` 截取全屏为位图；窗口管理器枚举可见窗口并裁剪。
-2. **识别**：`OcrEngine` 优先 `WindowsMediaOcrEngine`（手写 WinRT ABI 调用 `Windows.Media.Ocr`，
-   单线程套间 STA + 消息泵等待异步 `RecognizeAsync`），失败时回退 `TesseractOcrEngine`（子进程）。
-3. **存储**：`TraceDB`（SQLite）以事务写入 `snapshots` / `windows` / `text_blocks`，
-   文本统一以 **UTF-8** 存储。
-4. **检索**：`queryTextBlocksByContent` 用 `LIKE` 模糊匹配（输入参数经 UTF-16→UTF-8 正确转码，
-   规避控制台 GBK 代码页导致的中文匹配/显示乱码）。
+1. **Capture**: `ScreenCapture` grabs the full screen into a bitmap; the window manager enumerates visible windows and crops them.
+2. **Recognize**: `OcrEngine` prefers `WindowsMediaOcrEngine` (hand-written WinRT ABI calling `Windows.Media.Ocr`, single-threaded apartment STA + message-pump wait for the async `RecognizeAsync`), falling back to `TesseractOcrEngine` (subprocess) on failure.
+3. **Store**: `TraceDB` (SQLite) writes `snapshots` / `windows` / `text_blocks` in a transaction, with all text stored as **UTF-8**.
+4. **Search**: `queryTextBlocksByContent` uses `LIKE` fuzzy matching (input is correctly transcoded UTF-16 → UTF-8, avoiding the mojibake / match failures caused by the console's GBK codepage).
 
-## 许可证
+## License
 
-[MIT](LICENSE) —— 详见 `LICENSE` 文件。
+[MIT](LICENSE) — see the `LICENSE` file for details.
