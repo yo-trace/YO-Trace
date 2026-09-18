@@ -1,0 +1,23 @@
+; 仅列出阶段二所用到的 SQLite 导出符号（cdecl，32 位）
+; 由 dlltool -d 本文件 -D sqlite3.dll -l libsqlite3.a 生成导入库
+EXPORTS
+sqlite3_open
+sqlite3_close
+sqlite3_exec
+sqlite3_prepare_v2
+sqlite3_bind_text
+sqlite3_bind_int
+sqlite3_bind_int64
+sqlite3_bind_double
+sqlite3_step
+sqlite3_column_int
+sqlite3_column_int64
+sqlite3_column_double
+sqlite3_column_text
+sqlite3_column_count
+sqlite3_finalize
+sqlite3_last_insert_rowid
+sqlite3_errmsg
+sqlite3_free
+sqlite3_reset
+sqlite3_clear_bindings

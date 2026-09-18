@@ -1,0 +1,34 @@
+# ---- 构建产物 ----
+build/
+dist/
+
+# ---- 二进制与本地动态库（通过 Releases 分发，不入库）----
+*.exe
+*.dll
+*.o
+*.obj
+
+# ---- 数据库与日志（含个人屏幕采集数据，禁止公开）----
+*.db
+*.log
+
+# ---- 大型下载依赖树（MinGW / Tesseract / 包缓存，约 300MB+）----
+/third_party/
+
+# ---- 内部 / 敏感文档（本地保留，不公开）----
+竞争对手.md
+docs/竞品分析.md
+
+# ---- 编辑器 / IDE ----
+.vscode/
+
+# ---- 操作系统垃圾文件 ----
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ---- 误产生的临时文件（已清理，保留忽略以防复发）----
+nul
+set
+MandoCodeDesktop
+msty.yml
