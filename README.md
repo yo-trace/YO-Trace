@@ -71,7 +71,7 @@ g++.exe -std=c++17 -O2 -static ^
 ## Usage
 
 1. Double-click `yotrace_phase3.exe` to start (no main window; a tray icon appears).
-2. Capture is **event-driven**: `SetWinEventHook` watches window create/destroy/show/hide/focus/title-change/foreground-switch, and low-level keyboard/mouse-wheel hooks watch for typing/scrolling. All triggers collapse via a **200 ms silent-merge** (bursts within 200 ms become one write). Window-level triggers dedupe by title/rect; content-level triggers (typing/scrolling) force a write because on-screen text may have changed without the window moving. A 5-second poll also runs as a fallback. Press **F12** for an immediate capture; right-click the tray icon to exit.
+2. Capture is **event-driven**: `SetWinEventHook` watches window create/destroy/show/hide/focus/title-change/foreground-switch, and low-level keyboard/mouse-wheel hooks watch for typing/scrolling. All triggers collapse via a **200 ms silent-merge** (bursts within 200 ms become one write). Window-level triggers dedupe by title/rect and write a new window snapshot; content-level triggers (typing/scrolling) write **only the OCR text** (linked to the most recent window snapshot) without creating duplicate window records, because on-screen text may have changed without the window moving. A 5-second poll also runs as a fallback. Press **F12** for an immediate capture; right-click the tray icon to exit.
 3. Data is written to `yotrace_phase3.db` in the same directory; the run log goes to `yotrace_phase3.log`.
 4. Open a command line in that directory and search:
 

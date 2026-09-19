@@ -301,60 +301,76 @@ static std::string ComputeSignature(const Snapshot& snap) {
 }
 
 // 一次采集：窗口快照 + 截屏 + OCR + 落库
-// force=true（内容级触发）时跳过窗口签名去重，因为键盘/滚轮可能改变了屏幕文字而窗口标题/矩形未变。
+// force=true（内容级触发：键盘/滚轮）：只做 OCR 文本落地，不写窗口快照与控件树，
+// 避免打字/滚动期间每 200ms 一份重复窗口记录；文字关联到最近一次窗口级快照
+// （复用其窗口布局作为位置背景）。若尚无任何窗口级快照（极端情况），退化为完整采集一次。
 static void TriggerCapture(bool force = false) {
     Snapshot snap = CaptureSnapshot();
     std::string sig = ComputeSignature(snap);
-    if (!force && sig == g_lastSig) {
-        LogLine(L"[采集] " + snap.timeStr + L" 窗口无变化，跳过写入（窗口数=" +
-                std::to_wstring(snap.windows.size()) + L"）\n");
-        return;
-    }
-    g_lastSig = sig;
 
-    // windows 行
-    std::vector<WindowRow> rows;
+    long long snapId = 0;
+    std::vector<long long> windowIds;
+    std::vector<WindowRow> rows;        // 仅窗口级路径填充；内容级路径保持为空（落库窗口数=0）
     std::vector<ScreenWindow> screenWins;
-    rows.reserve(snap.windows.size());
+    int ctrlNodes = 0;
+    double totalCtrlMs = 0;
+
+    bool windowMode = !force;           // 是否写窗口快照/控件树
+    if (force) {
+        snapId = g_db.lastSnapshotId();
+        if (snapId == 0) { windowMode = true; force = false; }  // 尚无窗口级快照，退化
+    }
+
+    // 屏幕窗口线索（OCR 需要），两种模式都构建
     screenWins.reserve(snap.windows.size());
     for (const auto& w : snap.windows) {
-        WindowRow r;
-        r.title = W2U8(w.title);
-        r.app_name = W2U8(w.processName);
-        r.x1 = w.x1; r.y1 = w.y1; r.x2 = w.x2; r.y2 = w.y2;
-        rows.push_back(r);
         ScreenWindow sw; sw.title = w.title; sw.x1 = w.x1; sw.y1 = w.y1; sw.x2 = w.x2; sw.y2 = w.y2;
         screenWins.push_back(sw);
     }
 
-    double tw = 0;
-    std::vector<long long> windowIds;
-    if (!g_db.insertSnapshot(W2U8(snap.timeStr), rows, tw, windowIds)) {
-        LogLine(L"[错误] 写入 windows 失败：" + A2W(g_db.lastError() ? std::string(g_db.lastError()) : "") + L"\n");
-        return;
-    }
-    long long snapId = g_db.lastSnapshotId();
+    if (windowMode) {
+        // 窗口级路径：按窗口签名去重（窗口标题/矩形未变则跳过）
+        if (sig == g_lastSig) {
+            LogLine(L"[采集] " + snap.timeStr + L" 窗口无变化，跳过写入（窗口数=" +
+                    std::to_wstring(snap.windows.size()) + L"）\n");
+            return;
+        }
+        g_lastSig = sig;
 
-    // 任务 3.5：UIA 控件树抓取（仅当 COM 处于 STA 单元时可用）。
-    // 与 windowIds 一一对应（insertSnapshot 按 rows 顺序回填），逐窗口抓取控件树并落库。
-    // 内容级触发（force）时跳过：控件结构未变，且可避免打字/滚动高频期间反复遍历 UIA 的开销。
-    int ctrlNodes = 0;
-    double totalCtrlMs = 0;
-    if (g_uiaEnabled && !force) {
-        for (size_t i = 0; i < snap.windows.size() && i < windowIds.size(); ++i) {
-            const auto& w = snap.windows[i];
-            // 过滤极小窗口（工具提示/零尺寸），避免对不重要窗口做昂贵遍历
-            if ((w.x2 - w.x1) < 40 || (w.y2 - w.y1) < 40) continue;
-            std::vector<ControlNode> roots;
-            double cm = 0;
-            if (CaptureControlTree(w.hwnd, roots)) {
-                if (g_db.insertControls(windowIds[i], roots, cm)) {
-                    ctrlNodes += CountNodes(roots);
-                    totalCtrlMs += cm;
+        rows.reserve(snap.windows.size());
+        for (const auto& w : snap.windows) {
+            WindowRow r;
+            r.title = W2U8(w.title);
+            r.app_name = W2U8(w.processName);
+            r.x1 = w.x1; r.y1 = w.y1; r.x2 = w.x2; r.y2 = w.y2;
+            rows.push_back(r);
+        }
+
+        double tw = 0;
+        if (!g_db.insertSnapshot(W2U8(snap.timeStr), rows, tw, windowIds)) {
+            LogLine(L"[错误] 写入 windows 失败：" + A2W(g_db.lastError() ? std::string(g_db.lastError()) : "") + L"\n");
+            return;
+        }
+        snapId = g_db.lastSnapshotId();
+
+        // 任务 3.5：UIA 控件树抓取（仅窗口级触发）
+        if (g_uiaEnabled) {
+            for (size_t i = 0; i < snap.windows.size() && i < windowIds.size(); ++i) {
+                const auto& w = snap.windows[i];
+                // 过滤极小窗口（工具提示/零尺寸），避免对不重要窗口做昂贵遍历
+                if ((w.x2 - w.x1) < 40 || (w.y2 - w.y1) < 40) continue;
+                std::vector<ControlNode> roots;
+                double cm = 0;
+                if (CaptureControlTree(w.hwnd, roots)) {
+                    if (g_db.insertControls(windowIds[i], roots, cm)) {
+                        ctrlNodes += CountNodes(roots);
+                        totalCtrlMs += cm;
+                    }
                 }
             }
         }
     }
+    // 内容级模式：snapId 已为最近窗口级快照，不再写窗口/控件
 
     // 截屏（内存）
     ScreenBitmap bmp{};
@@ -396,7 +412,8 @@ static void TriggerCapture(bool force = false) {
         ? (L" 控件=" + std::to_wstring(ctrlNodes) +
            L" 控件耗时=" + std::to_wstring((long long)(totalCtrlMs * 1000)) + L"us")
         : L" 控件=跳过(COM非STA)";
-    std::wstring msg = L"[采集] " + snap.timeStr + L" snapshot_id=" +
+    std::wstring prefix = windowMode ? L"[采集] " : L"[采集-内容] ";
+    std::wstring msg = prefix + snap.timeStr + L" snapshot_id=" +
         std::to_wstring(snapId) + L" 窗口=" + std::to_wstring(rows.size()) +
         L" 文本块=" + nBlocksStr +
         L" 截屏=" + (captured ? L"OK" : L"失败") +
