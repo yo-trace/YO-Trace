@@ -4,6 +4,7 @@
 #include <vector>
 #include "sqlite3.h"
 #include "text_block.h"
+#include "control_tree.h"
 
 struct WindowRow {
     long long id = 0;
@@ -35,7 +36,8 @@ public:
     // elapsedMs 返回耗时（毫秒）。成功返回 true。
     bool insertSnapshot(const std::string& timestamp,
                         const std::vector<WindowRow>& wins,
-                        double& elapsedMs);
+                        double& elapsedMs,
+                        std::vector<long long>& windowIds);
 
     // 2.4 按时间范围查询窗口记录（timestamp 在 [t0, t1] 之间）
     std::vector<WindowRow> queryByTimeRange(const std::string& t0,
@@ -51,6 +53,14 @@ public:
 
     // 阶段三：按文本内容模糊查询 text_blocks
     std::vector<TextBlock> queryTextBlocksByContent(const std::string& keyword);
+
+    // 阶段三：写入一个窗口对应的控件树（controls 表，自引用 parent_id）
+    bool insertControls(long long windowId,
+                         const std::vector<ControlNode>& roots,
+                         double& elapsedMs);
+
+    // 阶段三：按控件名 / 自动化 Id / 类型模糊查询 controls
+    std::vector<ControlNode> queryControlsByContent(const std::string& keyword);
 
     // 最近一次写入的 snapshot id（用于去重/调试）
     long long lastSnapshotId() const { return last_snapshot_id_; }

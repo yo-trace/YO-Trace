@@ -11,10 +11,12 @@
 #include <iomanip>
 #include <algorithm>
 #include <queue>
+#include <functional>
 
 #include "sqlite_storage.h"
 #include "screen_capture.h"
 #include "ocr_engine.h"
+#include "uia_capture.h"   // 任务 3.5：UIA 控件树（需 MSVC + Windows SDK）
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "shell32.lib")
@@ -140,6 +142,7 @@ static TraceDB g_db;
 static IOcrEngine* g_ocr = nullptr;
 static NOTIFYICONDATAW g_nid = {0};
 static std::string g_lastSig;
+static bool g_uiaEnabled = true;   // UIA 控件树抓取开关（COM 处于 STA 时为 true）
 
 // ------------------------- 未处理截屏队列 + 空闲窗口补处理 -------------------------
 // 设计（用户确认：实时 + 空闲补处理；叠加视图 = 后台批量处理，无界面仅记录日志）：
@@ -206,6 +209,17 @@ static void DrainPendingBatch() {
             std::to_wstring(totalBlocks) + L"\n");
 }
 
+// 统计控件树节点总数（用于日志）
+static int CountNodes(const std::vector<ControlNode>& roots) {
+    int n = 0;
+    std::function<void(const ControlNode&)> walk = [&](const ControlNode& node) {
+        ++n;
+        for (const auto& c : node.children) walk(c);
+    };
+    for (const auto& r : roots) walk(r);
+    return n;
+}
+
 static std::string ComputeSignature(const Snapshot& snap) {
     std::string sig;
     for (const auto& w : snap.windows) {
@@ -243,11 +257,32 @@ static void TriggerCapture() {
     }
 
     double tw = 0;
-    if (!g_db.insertSnapshot(W2U8(snap.timeStr), rows, tw)) {
+    std::vector<long long> windowIds;
+    if (!g_db.insertSnapshot(W2U8(snap.timeStr), rows, tw, windowIds)) {
         LogLine(L"[错误] 写入 windows 失败：" + A2W(g_db.lastError() ? std::string(g_db.lastError()) : "") + L"\n");
         return;
     }
     long long snapId = g_db.lastSnapshotId();
+
+    // 任务 3.5：UIA 控件树抓取（仅当 COM 处于 STA 单元时可用）。
+    // 与 windowIds 一一对应（insertSnapshot 按 rows 顺序回填），逐窗口抓取控件树并落库。
+    int ctrlNodes = 0;
+    double totalCtrlMs = 0;
+    if (g_uiaEnabled) {
+        for (size_t i = 0; i < snap.windows.size() && i < windowIds.size(); ++i) {
+            const auto& w = snap.windows[i];
+            // 过滤极小窗口（工具提示/零尺寸），避免对不重要窗口做昂贵遍历
+            if ((w.x2 - w.x1) < 40 || (w.y2 - w.y1) < 40) continue;
+            std::vector<ControlNode> roots;
+            double cm = 0;
+            if (CaptureControlTree(w.hwnd, roots)) {
+                if (g_db.insertControls(windowIds[i], roots, cm)) {
+                    ctrlNodes += CountNodes(roots);
+                    totalCtrlMs += cm;
+                }
+            }
+        }
+    }
 
     // 截屏（内存）
     ScreenBitmap bmp{};
@@ -285,11 +320,16 @@ static void TriggerCapture() {
     }
 
     std::wstring nBlocksStr = (nBlocks < 0) ? L"待处理(已入队)" : std::to_wstring(nBlocks);
+    std::wstring ctrlStr = g_uiaEnabled
+        ? (L" 控件=" + std::to_wstring(ctrlNodes) +
+           L" 控件耗时=" + std::to_wstring((long long)(totalCtrlMs * 1000)) + L"us")
+        : L" 控件=跳过(COM非STA)";
     std::wstring msg = L"[采集] " + snap.timeStr + L" snapshot_id=" +
         std::to_wstring(snapId) + L" 窗口=" + std::to_wstring(rows.size()) +
         L" 文本块=" + nBlocksStr +
         L" 截屏=" + (captured ? L"OK" : L"失败") +
-        L" 文本块耗时=" + std::to_wstring((long long)(ocrMs * 1000)) + L"us\n";
+        L" 文本块耗时=" + std::to_wstring((long long)(ocrMs * 1000)) + L"us" +
+        ctrlStr + L"\n";
     LogLine(msg);
 }
 
@@ -353,6 +393,15 @@ int main() {
     // 让控制台正确显示 UTF-8 / 中文（wcout 走宽字符，这里仅作保底）
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+
+    // COM 初始化为 STA：UIA 控件树与 Windows.Media.Ocr 都要求 STA 单元。
+    // 先于此初始化，可保证即使 OCR 回退到 Tesseract（不调用 RoInitialize），UIA 仍可工作。
+    // 若 COM 已被其他组件以 MTA 初始化（RPC_E_CHANGED_MODE），则关闭 UIA 抓取以免死锁。
+    HRESULT hrCo = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (hrCo == RPC_E_CHANGED_MODE) {
+        g_uiaEnabled = false;
+        std::wcerr << L"[警告] COM 已以 MTA 模式初始化（冲突），UIA 控件树抓取将跳过。\n";
+    }
 
     wchar_t exePath[MAX_PATH] = {0};
     GetModuleFileNameW(NULL, exePath, MAX_PATH);

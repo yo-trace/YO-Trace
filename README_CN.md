@@ -16,18 +16,33 @@ YO-Trace 在后台持续「观察」你的屏幕：每隔几秒采集一次可�
 - **空闲批量补处理**：高频变化时的截图先入队，在「空闲窗口」（每小时前 5 分钟或连续 60 秒无变化）于后台批量识别，避免反复 OCR 打满 CPU。
 - **托盘常驻**：主程序无主窗口，常驻系统托盘，F12 立即触发一次采集，右键退出。
 - **命令行检索**：`yotrace_query.exe <关键字>` 按内容模糊搜索历史文本块。
+- **UIA 控件树检索**（需 MSVC 构建）：使用 Visual Studio 工具链构建时，每次采集还会记录每个窗口的 **UI Automation 控件树**（控件类型、名称、AutomationId、屏幕矩形）。随后可按控件名/Id/类型检索，例如 `yotrace_query.exe --control 加入会议` 能定位到某应用窗口里的「加入会议」按钮。（MinGW 构建不含此特性，因其缺少 UIA SDK 头文件。）
 
 ## 系统要求
 
 - Windows 10 / 11（原生 OCR 需要系统自带 OCR 语言包；中文/英文默认可用）。
-- MinGW-w64 工具链（g++ 10+，用于从源码构建）。
+- C++17 工具链：
+  - **Visual Studio（MSVC）+ Windows SDK** —— *推荐*。启用 **UIA 控件树** 特性（官方 `uiautomation.h` 由 Windows SDK 提供）。通过 CMake 构建（见下）。
+  - **MinGW-w64**（`g++` 10+）—— 同样支持，但**不包含** UIA 控件树特性（该工具链未随附 UIA 头文件）。
 - （可选）Tesseract 运行时，仅当原生 OCR 不可用时作为回退。
 
 ## 构建
 
 仓库已内置 SQLite 的导入库与头文件（`src/phase2/third_party/sqlite/`），无需额外下载即可编译。
 
-使用 MinGW-w64 的 `g++`：
+### 方式 A —— CMake + MSVC（推荐；启用 UIA 控件树）
+
+在 **Visual Studio 开发者命令提示符** 中（确保 `lib.exe`、`cl.exe` 与 Windows SDK 已在 `PATH`）执行：
+
+```bash
+cmake -S . -B build -A Win32      # 32 位（与随仓库的 sqlite3.dll / libsqlite3.a 匹配）
+# 或：cmake -S . -B build -A x64  # 仅当你自备 64 位 sqlite3.dll 时使用
+cmake --build build --config Release
+```
+
+该流程会以仓库自带的 `sqlite3.def` 经 `lib.exe` 生成 `sqlite3.lib`，编译**含** `uia_capture.cpp` 的 `yotrace_phase3.exe`，并在存在 `dist/sqlite3.dll` 时将其复制到输出目录。
+
+### 方式 B —— MinGW-w64 `g++`（不含 UIA 控件树）
 
 ```bash
 # 阶段三主程序
@@ -63,6 +78,7 @@ g++.exe -std=c++17 -O2 -static ^
    ```bash
    yotrace_query.exe             # 列出全部已识别文本块
    yotrace_query.exe 微信        # 按关键字搜索
+   yotrace_query.exe --control 加入会议   # 按控件名/AutomationId/类型检索 UIA 控件树
    ```
 
    > 查询工具从**自身所在目录**读取 `yotrace_phase3.db`，并依赖同目录的 `sqlite3.dll`。
@@ -94,10 +110,12 @@ YO-Trace/
 1. **采集**：`ScreenCapture` 截取全屏为位图；窗口管理器枚举可见窗口并裁剪。
 2. **识别**：`OcrEngine` 优先 `WindowsMediaOcrEngine`（手写 WinRT ABI 调用 `Windows.Media.Ocr`，
    单线程套间 STA + 消息泵等待异步 `RecognizeAsync`），失败时回退 `TesseractOcrEngine`（子进程）。
-3. **存储**：`TraceDB`（SQLite）以事务写入 `snapshots` / `windows` / `text_blocks`，
-   文本统一以 **UTF-8** 存储。
+3. **存储**：`TraceDB`（SQLite）以事务写入 `snapshots` / `windows` / `text_blocks` / `controls`，
+   文本统一以 **UTF-8** 存储。MSVC 构建下 `insertControls` 按窗口遍历 UIA 控件树（深度 ≤ 12、节点 ≤ 2000），
+   写入自引用的 `controls` 表（`parent_id` 关联父子节点）。
 4. **检索**：`queryTextBlocksByContent` 用 `LIKE` 模糊匹配（输入参数经 UTF-16→UTF-8 正确转码，
-   规避控制台 GBK 代码页导致的中文匹配/显示乱码）。
+   规避控制台 GBK 代码页导致的中文匹配/显示乱码）。MSVC 构建另提供 `queryControlsByContent`，
+   可通过 `yotrace_query.exe --control <关键字>` 检索控件树。
 
 ## 许可证
 

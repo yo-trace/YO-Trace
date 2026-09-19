@@ -1,6 +1,24 @@
 // YO-Trace 阶段二：SQLite 存储层实现
 #include "sqlite_storage.h"
 #include <chrono>
+#include <functional>
+#include <windows.h>
+
+// UTF-8 <-> UTF-16 辅助（控件树 ControlNode 用 wstring，库内以 UTF-8 存储）
+static std::string W2U8(const std::wstring& s) {
+    if (s.empty()) return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0, NULL, NULL);
+    std::string out(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), &out[0], n, NULL, NULL);
+    return out;
+}
+static std::wstring U82W(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), NULL, 0);
+    std::wstring out(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &out[0], n);
+    return out;
+}
 
 bool TraceDB::open(const std::string& path) {
     int rc = sqlite3_open(path.c_str(), &db_);
@@ -39,7 +57,18 @@ bool TraceDB::createSchema() {
         "  x1 INTEGER, y1 INTEGER, x2 INTEGER, y2 INTEGER,"
         "  FOREIGN KEY(snapshot_id) REFERENCES snapshots(id));"
         "CREATE INDEX IF NOT EXISTS idx_windows_snapshot ON windows(snapshot_id);"
-        "CREATE INDEX IF NOT EXISTS idx_windows_title ON windows(title);";
+        "CREATE INDEX IF NOT EXISTS idx_windows_title ON windows(title);"
+        "CREATE TABLE IF NOT EXISTS controls("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  window_id INTEGER,"
+        "  parent_id INTEGER,"
+        "  control_type TEXT,"
+        "  name TEXT,"
+        "  automation_id TEXT,"
+        "  value TEXT,"
+        "  x1 INTEGER, y1 INTEGER, x2 INTEGER, y2 INTEGER,"
+        "  FOREIGN KEY(window_id) REFERENCES windows(id));"
+        "CREATE INDEX IF NOT EXISTS idx_controls_window ON controls(window_id);";
     char* err = nullptr;
     int rc = sqlite3_exec(db_, schema, nullptr, nullptr, &err);
     if (rc != SQLITE_OK) {
@@ -53,7 +82,8 @@ bool TraceDB::createSchema() {
 
 bool TraceDB::insertSnapshot(const std::string& timestamp,
                              const std::vector<WindowRow>& wins,
-                             double& elapsedMs) {
+                             double& elapsedMs,
+                             std::vector<long long>& windowIds) {
     auto t0 = std::chrono::high_resolution_clock::now();
 
     // 开事务，保证整批原子写入并大幅提升性能
@@ -104,6 +134,7 @@ bool TraceDB::insertSnapshot(const std::string& timestamp,
             sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
             return false;
         }
+        windowIds.push_back(sqlite3_last_insert_rowid(db_));
         sqlite3_reset(stmtWin);
         sqlite3_clear_bindings(stmtWin);
     }
@@ -222,6 +253,94 @@ bool TraceDB::insertTextBlocks(long long snapshotId,
     elapsedMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
     last_err_ = nullptr;
     return true;
+}
+
+bool TraceDB::insertControls(long long windowId,
+                             const std::vector<ControlNode>& roots,
+                             double& elapsedMs) {
+    auto t0 = std::chrono::high_resolution_clock::now();
+    if (sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        last_err_ = "BEGIN failed";
+        return false;
+    }
+    const char* sql =
+        "INSERT INTO controls(window_id,parent_id,control_type,name,automation_id,value,x1,y1,x2,y2) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        last_err_ = sqlite3_errmsg(db_);
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        return false;
+    }
+    try {
+        std::function<void(const ControlNode&, long long)> insertNode =
+            [&](const ControlNode& n, long long parentId) {
+                sqlite3_reset(stmt);
+                sqlite3_clear_bindings(stmt);
+                sqlite3_bind_int64(stmt, 1, windowId);
+                sqlite3_bind_int64(stmt, 2, parentId < 0 ? 0 : parentId);  // 0 表示根节点
+                sqlite3_bind_text(stmt, 3, W2U8(n.controlType).c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 4, W2U8(n.name).c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 5, W2U8(n.automationId).c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 6, "", -1, SQLITE_TRANSIENT);  // value 预留
+                sqlite3_bind_int(stmt, 7, n.x1);
+                sqlite3_bind_int(stmt, 8, n.y1);
+                sqlite3_bind_int(stmt, 9, n.x2);
+                sqlite3_bind_int(stmt, 10, n.y2);
+                if (sqlite3_step(stmt) != SQLITE_DONE) {
+                    last_err_ = sqlite3_errmsg(db_);
+                    throw 1;
+                }
+                long long id = sqlite3_last_insert_rowid(db_);
+                for (const auto& c : n.children) insertNode(c, id);
+            };
+        for (const auto& r : roots) insertNode(r, -1);
+    } catch (...) {
+        sqlite3_finalize(stmt);
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        return false;
+    }
+    sqlite3_finalize(stmt);
+    if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        last_err_ = "COMMIT failed";
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        return false;
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    elapsedMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    last_err_ = nullptr;
+    return true;
+}
+
+std::vector<ControlNode> TraceDB::queryControlsByContent(const std::string& keyword) {
+    std::vector<ControlNode> out;
+    std::string like = "%" + keyword + "%";
+    const char* sql =
+        "SELECT id,window_id,control_type,name,automation_id,x1,y1,x2,y2 "
+        "FROM controls WHERE name LIKE ? OR automation_id LIKE ? OR control_type LIKE ? "
+        "ORDER BY id DESC";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    sqlite3_bind_text(stmt, 1, like.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, like.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, like.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ControlNode n;
+        n.windowId = sqlite3_column_int64(stmt, 1);
+        const unsigned char* ct = sqlite3_column_text(stmt, 2);
+        const unsigned char* nm = sqlite3_column_text(stmt, 3);
+        const unsigned char* aid = sqlite3_column_text(stmt, 4);
+        n.controlType = ct ? U82W((const char*)ct) : L"";
+        n.name = nm ? U82W((const char*)nm) : L"";
+        n.automationId = aid ? U82W((const char*)aid) : L"";
+        n.x1 = sqlite3_column_int(stmt, 5);
+        n.y1 = sqlite3_column_int(stmt, 6);
+        n.x2 = sqlite3_column_int(stmt, 7);
+        n.y2 = sqlite3_column_int(stmt, 8);
+        out.push_back(std::move(n));
+    }
+    sqlite3_finalize(stmt);
+    return out;
 }
 
 std::vector<TextBlock> TraceDB::queryTextBlocksByContent(const std::string& keyword) {
