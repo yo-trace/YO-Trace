@@ -49,6 +49,42 @@ static void LogLine(const std::wstring& s) {
 
 static HWND g_msgWnd = NULL;  // 提前声明，供控制台关闭处理器使用
 
+// 阶段四：窗口事件钩子（事件驱动采集）。WINEVENT_OUTOFCONTEXT 使回调在本线程消息循环中派发，
+// 故无需额外线程；WINEVENT_SKIPOWNPROCESS 忽略本进程自身事件，避免自触发。
+static HWINEVENTHOOK g_winHooks[3] = { NULL, NULL, NULL };
+
+// 阶段四：200ms 静默合并。事件驱动采集时，200ms 内的连续变化只触发一次采集；
+// 任一事件都会重置该计时器，直到 200ms 内无新事件才真正执行 TriggerCapture。
+static void ScheduleCapture() {
+    if (g_msgWnd) SetTimer(g_msgWnd, 3, 200, NULL);
+}
+
+// 仅当标题"整体就是一串时钟"时忽略（独立时钟挂件每分钟刷新标题的噪声），
+// 形如 "14:30" / "14:30:05"；含其它文字的标题（如"会议 - 14:30"）仍正常采集。
+static bool IsPureClockTitle(const std::wstring& t) {
+    if (t.empty() || t.size() > 8) return false;
+    bool hasColon = false;
+    for (wchar_t c : t) {
+        if (c == L':' || c == L'：') { hasColon = true; continue; }
+        if (c < L'0' || c > L'9') return false;
+    }
+    return hasColon;
+}
+
+static void CALLBACK WinEventProc(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd,
+                                  LONG idObject, LONG idChild, DWORD /*dwEventThread*/,
+                                  DWORD /*dwmsEventTime*/) {
+    (void)event;
+    // 只关心窗口对象本身（控件子元素的事件忽略）；CHILDID_SELF == 0
+    if (idObject != OBJID_WINDOW || idChild != 0) return;
+    if (hwnd == g_msgWnd) return;                 // 忽略自身消息窗口
+    if (event == EVENT_OBJECT_NAMECHANGE) {
+        wchar_t buf[256] = { 0 };
+        if (GetWindowTextW(hwnd, buf, 256) && IsPureClockTitle(buf)) return;
+    }
+    ScheduleCapture();
+}
+
 // 控制台关闭时清理托盘图标，避免残留
 static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl) {
     if (ctrl == CTRL_C_EVENT || ctrl == CTRL_CLOSE_EVENT) {
@@ -337,8 +373,15 @@ static void TriggerCapture() {
 static LRESULT CALLBACK MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_TIMER:
-            if (IsIdleWindow()) DrainPendingBatch();   // 空闲窗口：后台批量补处理未处理截屏
-            TriggerCapture();
+            if (wParam == 2) {
+                // 5 秒轮询兜底：捕捉窗口内文字变化等无窗口事件的变化
+                if (IsIdleWindow()) DrainPendingBatch();   // 空闲窗口：后台批量补处理未处理截屏
+                TriggerCapture();
+            } else if (wParam == 3) {
+                // 阶段四：事件驱动采集的 200ms 静默合并计时器到点，落实一次采集
+                KillTimer(g_msgWnd, 3);
+                TriggerCapture();
+            }
             return 0;
         case WM_HOTKEY:
             if (wParam == 1) { LogLine(L"[F12] 手动采集触发\n"); TriggerCapture(); }
@@ -359,6 +402,7 @@ static LRESULT CALLBACK MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (LOWORD(wParam) == ID_TRAY_EXIT) DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            for (HWINEVENTHOOK h : g_winHooks) if (h) UnhookWinEvent(h);  // 阶段四：卸载事件钩子
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
             PostQuitMessage(0);
             return 0;
@@ -426,7 +470,9 @@ int main() {
         return 1;
     }
     LogLine(L"数据库就绪：" + exeDir + L"yotrace_phase3.db\n");
-    LogLine(L"托盘常驻：右键退出；F12 立即采集；每 5 秒自动采集（无变化跳过）。\n");
+    LogLine(L"托盘常驻：右键退出；F12 立即采集。\n");
+    LogLine(L"采集触发：窗口事件驱动（创建/销毁/显隐/聚焦/标题变化/前台切换）+ 200ms 静默合并；"
+            L"另保留每 5 秒轮询兜底捕捉窗口内文字变化。无变化则跳过写入。\n");
     LogLine(L"OCR 策略：变化时实时识别；空闲窗口（每小时前 " + std::to_wstring(IDLE_MINUTE_THRESHOLD) +
             L" 分钟 / 连续 " + std::to_wstring(IDLE_QUIET_MS / 1000) +
             L"s 无变化）后台批量补处理未处理截屏。\n");
@@ -435,6 +481,23 @@ int main() {
 
     if (!CreateMsgWindow()) { std::wcout << L"创建消息窗口失败：" << GetLastError() << L"\n"; return 1; }
     AddTrayIcon(g_msgWnd);
+
+    // 阶段四：注册窗口事件钩子，实现事件驱动采集。
+    // 用三组范围监听，刻意避开 EVENT_OBJECT_LOCATIONCHANGE（光标闪烁/动画每帧都会触发，噪声过大）。
+    g_winHooks[0] = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_STATECHANGE,
+                                    NULL, WinEventProc, 0, 0,
+                                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    g_winHooks[1] = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
+                                    NULL, WinEventProc, 0, 0,
+                                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    g_winHooks[2] = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                                    NULL, WinEventProc, 0, 0,
+                                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    if (!g_winHooks[0] && !g_winHooks[1] && !g_winHooks[2]) {
+        LogLine(L"[警告] SetWinEventHook 全部失败（错误码 " + std::to_wstring(GetLastError()) +
+                L"），将仅依赖 5 秒轮询采集。\n");
+    }
+
     if (!RegisterHotKey(g_msgWnd, 1, MOD_NOREPEAT, VK_F12)) {
         LogLine(L"[警告] 注册 F12 失败，错误码 " + std::to_wstring(GetLastError()) + L"\n");
     }

@@ -200,9 +200,9 @@
 
 ### 任务 3.5：Accessibility API 补充
 
-- [ ] 学习 UIA 基础 API
-- [ ] 获取当前活动窗口的控件树
-- [ ] 与 OCR 结果合并
+- [x] 学习 UIA 基础 API（官方 uiautomation.h，随 Windows SDK / MSVC）
+- [x] 获取当前活动窗口的控件树（uia_capture.cpp：CoCreateInstance CLSID_CUIAutomation + 递归遍历，深度≤12/节点≤2000）
+- [x] 与 OCR 结果合并（controls 表按 window_id 关联；--control 可按控件名/Id/类型检索）
 
 **阶段三完成标志：** 数据库中的文字块和屏幕上的文字一致
 
@@ -216,15 +216,15 @@
 
 ### 任务 4.1：0.2 秒静默合并
 
-- [ ] 每次变化触发时启动 200ms 计时器
-- [ ] 200ms 内再次触发则重置计时器
-- [ ] 200ms 无新变化才执行存储
+- [x] 每次变化触发时启动 200ms 计时器（ScheduleCapture -> SetTimer(id=3,200ms)）
+- [x] 200ms 内再次触发则重置计时器（多次 SetTimer 同 id 即重置）
+- [x] 200ms 无新变化才执行存储（WM_TIMER id=3 -> KillTimer + TriggerCapture）
 
 ### 任务 4.2：窗口级触发（高优先级）
 
-- [ ] 监听窗口切换事件（SetWinEventHook）
-- [ ] 监听窗口标题变化
-- [ ] 窗口切换时立即触发采集
+- [x] 监听窗口切换事件（SetWinEventHook，三组范围：CREATE..STATECHANGE / NAMECHANGE / SYSTEM_FOREGROUND）
+- [x] 监听窗口标题变化（EVENT_OBJECT_NAMECHANGE）
+- [x] 窗口切换时立即触发采集（事件钩子 -> ScheduleCapture -> 200ms 后 TriggerCapture）
 
 ### 任务 4.3：内容级触发（低优先级）
 
@@ -234,10 +234,10 @@
 
 ### 任务 4.4：无效变化过滤
 
-- [ ] 过滤系统时钟刷新
-- [ ] 过滤光标闪烁
-- [ ] 过滤任务栏通知闪烁
-- [ ] 过滤窗口 1px 抖动
+- [x] 过滤系统时钟刷新（NAMECHANGE 且标题整体为时钟串如 "14:30" 则忽略）
+- [x] 过滤光标闪烁（刻意不订阅 EVENT_OBJECT_LOCATIONCHANGE，光标/动画每帧的噪声不触发）
+- [x] 过滤任务栏通知闪烁（仅窗口对象事件且忽略自身消息窗口）
+- [x] 过滤窗口 1px 抖动（1px 抖动不触发窗口级事件，且 LOCATIONCHANGE 未订阅）
 
 ### 任务 4.5：相似度去重
 
@@ -245,6 +245,7 @@
 - [ ] 变化 < 10% → 不存储
 - [ ] 变化 10%-30% → 只存文字，不存截图
 - [ ] 变化 > 30% → 存截图 + 文字
+> 注：4.5 依赖"截图存储"，当前阶段一~三仅存 OCR 文字/窗口元数据/控件树，未落盘截图，故 4.5 暂未实现（待阶段七叠加视图引入截图后再做）。
 
 **阶段四完成标志：** 运行1小时，存储次数远低于触发次数
 

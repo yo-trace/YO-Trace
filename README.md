@@ -71,7 +71,7 @@ g++.exe -std=c++17 -O2 -static ^
 ## Usage
 
 1. Double-click `yotrace_phase3.exe` to start (no main window; a tray icon appears).
-2. The program captures automatically every 5 seconds; press **F12** for an immediate capture; right-click the tray icon to exit.
+2. Capture is **event-driven**: `SetWinEventHook` watches window create/destroy/show/hide/focus/title-change/foreground-switch and triggers a capture with a **200 ms silent-merge** (bursts within 200 ms collapse into one write), so the database only grows on real changes. A 5-second poll also runs as a fallback to catch in-window text changes. Press **F12** for an immediate capture; right-click the tray icon to exit.
 3. Data is written to `yotrace_phase3.db` in the same directory; the run log goes to `yotrace_phase3.log`.
 4. Open a command line in that directory and search:
 
