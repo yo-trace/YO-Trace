@@ -228,9 +228,10 @@
 
 ### 任务 4.3：内容级触发（低优先级）
 
-- [ ] 监听滚动事件
-- [ ] 监听键盘输入
-- [ ] 这些触发走 200ms 合并逻辑
+- [x] 监听滚动事件（WH_MOUSE_LL 钩子，WM_MOUSEWHEEL / WM_MOUSEHWHEEL -> ScheduleCapture(true)）
+- [x] 监听键盘输入（WH_KEYBOARD_LL 钩子，WM_KEYDOWN/SYSKEYDOWN，忽略纯修饰键 -> ScheduleCapture(true)）
+- [x] 这些触发走 200ms 合并逻辑（与窗口事件共用 ScheduleCapture + 定时器 3）
+- [x] 内容级触发强制落库：TriggerCapture(bool force) 跳过窗口签名去重；控件树抓取在此期间跳过（结构未变）
 
 ### 任务 4.4：无效变化过滤
 

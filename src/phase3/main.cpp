@@ -52,10 +52,17 @@ static HWND g_msgWnd = NULL;  // 提前声明，供控制台关闭处理器使�
 // 阶段四：窗口事件钩子（事件驱动采集）。WINEVENT_OUTOFCONTEXT 使回调在本线程消息循环中派发，
 // 故无需额外线程；WINEVENT_SKIPOWNPROCESS 忽略本进程自身事件，避免自触发。
 static HWINEVENTHOOK g_winHooks[3] = { NULL, NULL, NULL };
+// 阶段四 4.3：内容级触发钩子（低层键盘/鼠标，系统级）。
+static HHOOK g_kbHook = NULL;
+static HHOOK g_mouseHook = NULL;
+// 内容级触发需要"强制落库"标志：窗口标题/矩形未变但屏幕文字可能已变，故绕过窗口签名去重。
+static bool g_forceNextCapture = false;
 
 // 阶段四：200ms 静默合并。事件驱动采集时，200ms 内的连续变化只触发一次采集；
 // 任一事件都会重置该计时器，直到 200ms 内无新事件才真正执行 TriggerCapture。
-static void ScheduleCapture() {
+// force=true 表示内容级触发（键盘/滚轮），到达触发点时应跳过窗口签名去重。
+static void ScheduleCapture(bool force = false) {
+    if (force) g_forceNextCapture = true;
     if (g_msgWnd) SetTimer(g_msgWnd, 3, 200, NULL);
 }
 
@@ -83,6 +90,33 @@ static void CALLBACK WinEventProc(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd
         if (GetWindowTextW(hwnd, buf, 256) && IsPureClockTitle(buf)) return;
     }
     ScheduleCapture();
+}
+
+// 阶段四 4.3：低层键盘钩子（系统级）。仅响应会"产生内容"的按键（忽略纯修饰键），
+// 触发内容级采集（强制落库）。低层钩子在本线程消息循环中派发，回调需极快（仅置标志+定时器）。
+static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+        const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)lParam;
+        // 纯修饰键（Ctrl/Shift/Alt/Win/Caps/Lock/Scroll）不产生内容变化，跳过以减少噪声
+        switch (k->vkCode) {
+        case VK_CONTROL: case VK_SHIFT: case VK_MENU:
+        case VK_LWIN: case VK_RWIN: case VK_CAPITAL:
+        case VK_NUMLOCK: case VK_SCROLL:
+            break;
+        default:
+            ScheduleCapture(true);
+            break;
+        }
+    }
+    return CallNextHookEx(g_kbHook, nCode, wParam, lParam);
+}
+
+// 阶段四 4.3：低层鼠标钩子，监听滚轮（滚动 = 内容可能变化），触发内容级采集。
+static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION && (wParam == WM_MOUSEWHEEL || wParam == WM_MOUSEHWHEEL)) {
+        ScheduleCapture(true);
+    }
+    return CallNextHookEx(g_mouseHook, nCode, wParam, lParam);
 }
 
 // 控制台关闭时清理托盘图标，避免残留
@@ -267,10 +301,11 @@ static std::string ComputeSignature(const Snapshot& snap) {
 }
 
 // 一次采集：窗口快照 + 截屏 + OCR + 落库
-static void TriggerCapture() {
+// force=true（内容级触发）时跳过窗口签名去重，因为键盘/滚轮可能改变了屏幕文字而窗口标题/矩形未变。
+static void TriggerCapture(bool force = false) {
     Snapshot snap = CaptureSnapshot();
     std::string sig = ComputeSignature(snap);
-    if (sig == g_lastSig) {
+    if (!force && sig == g_lastSig) {
         LogLine(L"[采集] " + snap.timeStr + L" 窗口无变化，跳过写入（窗口数=" +
                 std::to_wstring(snap.windows.size()) + L"）\n");
         return;
@@ -302,9 +337,10 @@ static void TriggerCapture() {
 
     // 任务 3.5：UIA 控件树抓取（仅当 COM 处于 STA 单元时可用）。
     // 与 windowIds 一一对应（insertSnapshot 按 rows 顺序回填），逐窗口抓取控件树并落库。
+    // 内容级触发（force）时跳过：控件结构未变，且可避免打字/滚动高频期间反复遍历 UIA 的开销。
     int ctrlNodes = 0;
     double totalCtrlMs = 0;
-    if (g_uiaEnabled) {
+    if (g_uiaEnabled && !force) {
         for (size_t i = 0; i < snap.windows.size() && i < windowIds.size(); ++i) {
             const auto& w = snap.windows[i];
             // 过滤极小窗口（工具提示/零尺寸），避免对不重要窗口做昂贵遍历
@@ -379,8 +415,10 @@ static LRESULT CALLBACK MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 TriggerCapture();
             } else if (wParam == 3) {
                 // 阶段四：事件驱动采集的 200ms 静默合并计时器到点，落实一次采集
+                // （内容级触发设置了 g_forceNextCapture，则跳过窗口签名去重）
                 KillTimer(g_msgWnd, 3);
-                TriggerCapture();
+                TriggerCapture(g_forceNextCapture);
+                g_forceNextCapture = false;
             }
             return 0;
         case WM_HOTKEY:
@@ -402,7 +440,9 @@ static LRESULT CALLBACK MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (LOWORD(wParam) == ID_TRAY_EXIT) DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
-            for (HWINEVENTHOOK h : g_winHooks) if (h) UnhookWinEvent(h);  // 阶段四：卸载事件钩子
+            for (HWINEVENTHOOK h : g_winHooks) if (h) UnhookWinEvent(h);  // 阶段四：卸载窗口事件钩子
+            if (g_kbHook) UnhookWindowsHookEx(g_kbHook);                   // 阶段四 4.3：卸载键盘钩子
+            if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);            // 阶段四 4.3：卸载鼠标钩子
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
             PostQuitMessage(0);
             return 0;
@@ -471,8 +511,9 @@ int main() {
     }
     LogLine(L"数据库就绪：" + exeDir + L"yotrace_phase3.db\n");
     LogLine(L"托盘常驻：右键退出；F12 立即采集。\n");
-    LogLine(L"采集触发：窗口事件驱动（创建/销毁/显隐/聚焦/标题变化/前台切换）+ 200ms 静默合并；"
-            L"另保留每 5 秒轮询兜底捕捉窗口内文字变化。无变化则跳过写入。\n");
+    LogLine(L"采集触发：窗口事件驱动（创建/销毁/显隐/聚焦/标题变化/前台切换）+ 内容级触发"
+            L"（键盘输入/鼠标滚轮）+ 200ms 静默合并；另保留每 5 秒轮询兜底。"
+            L"窗口级触发按标题/矩形去重，内容级触发强制落库（文字可能已变）。\n");
     LogLine(L"OCR 策略：变化时实时识别；空闲窗口（每小时前 " + std::to_wstring(IDLE_MINUTE_THRESHOLD) +
             L" 分钟 / 连续 " + std::to_wstring(IDLE_QUIET_MS / 1000) +
             L"s 无变化）后台批量补处理未处理截屏。\n");
@@ -496,6 +537,15 @@ int main() {
     if (!g_winHooks[0] && !g_winHooks[1] && !g_winHooks[2]) {
         LogLine(L"[警告] SetWinEventHook 全部失败（错误码 " + std::to_wstring(GetLastError()) +
                 L"），将仅依赖 5 秒轮询采集。\n");
+    }
+
+    // 阶段四 4.3：内容级触发 —— 低层键盘/鼠标滚轮钩子（系统级）。
+    // 回调仅置标志 + 定时器（极快），不阻塞输入；消息循环在本线程派发。
+    g_kbHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
+    g_mouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(NULL), 0);
+    if (!g_kbHook || !g_mouseHook) {
+        LogLine(L"[警告] 键盘/鼠标钩子注册失败（错误码 " + std::to_wstring(GetLastError()) +
+                L"），内容级触发将不可用（仍可用窗口事件与 5 秒轮询）。\n");
     }
 
     if (!RegisterHotKey(g_msgWnd, 1, MOD_NOREPEAT, VK_F12)) {
